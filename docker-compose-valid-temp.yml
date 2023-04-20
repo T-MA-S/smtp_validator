@@ -1,0 +1,14 @@
+---
+version: "3.8"
+
+services:
+
+  validator:
+    image: ${REPO}/${IMAGE}:${BUILDTAG}
+    container_name: email_validator
+    restart: always
+    ports:
+      - "80:80"
+    labels:
+      logging: "promtail"
+      logging_jobname: "validator"

@@ -1,0 +1,100 @@
+name: email Validator deploy
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build_and_pub:
+    if: "github.event.release"
+    runs-on: ubuntu-20.04
+    env:
+      LOGIN: ${{ secrets.DOCKER_LOGIN }}
+      NAME: ${{ secrets.DOCKER_NAME }}
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Login to docker.io
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKER_LOGIN }}
+          password: ${{ secrets.DOCKER_PASS }}      
+
+      - name: Build
+        run: docker build -t $LOGIN/$NAME:${GITHUB_REF:10} -f Dockerfile .
+
+      - name: Push image to docker.io
+        run: docker push -a $LOGIN/$NAME
+
+  docker_run:
+    needs: build_and_pub
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: copy file
+        uses: appleboy/scp-action@master
+    
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          source: "docker-compose-valid-temp.yml"
+          target: "/home/${{ secrets.SSH_USERNAME }}/"
+
+      - name: Executing remote ssh commands using ssh key
+        uses: appleboy/ssh-action@master
+
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          script_stop: false
+
+          script: |
+            set -e
+            echo 'START'
+            echo 'create directories'
+            mkdir -p /home/$USER/validator_install
+            mkdir -p /home/$USER/validator_backup
+            
+            echo 'create variables'
+            export BUILDTAG='${{github.ref_name}}'
+            export REPO='${{ secrets.DOCKER_LOGIN }}'
+            export IMAGE='${{ secrets.DOCKER_NAME }}'
+            
+            echo 'backup last docker-compose'            
+            if [[ -f /home/$USER/validator_install/docker-compose.yml ]]
+            then
+                echo 'copy file'
+                cp /home/$USER/validator_install/docker-compose.yml /home/$USER/validator_backup/docker-compose.yml
+            else
+                echo 'Nothing to backup'
+            fi
+            echo '${{ secrets.DOCKER_PASS }}' | docker login --username '${{ secrets.DOCKER_LOGIN }}' --password-stdin
+                             
+            echo 'create a docker-compose file'
+            envsubst < docker-compose-valid-temp.yml > /home/$USER/validator_install/docker-compose.yml
+            
+            cd /home/$USER/validator_install
+            echo 'docker UP'
+            docker-compose -f docker-compose.yml up -d
+            
+            echo 'rm images'
+            docker rmi $(docker images ${{ secrets.DOCKER_LOGIN }}/${{ secrets.DOCKER_NAME }} -q | tail -n +3) || true
+                        
+            sleep 15
+            echo 'test if container works'
+            if [ "$( docker container inspect -f '{{.State.Status}}' email_validator )" = "running" ]
+            then
+                echo "Congratulations!"
+            else
+                echo 'rollbacking'
+                cp /home/$USER/validator_backup/docker-compose.yml /home/$USER/validator_install/docker-compose.yml
+                docker-compose -f docker-compose.yml up -d
+                echo 'rolled back'
+                exit 1
+            fi
+            docker logout
+            echo 'FINISH'
+            
